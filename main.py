@@ -41,7 +41,8 @@ class Block:
         self.fit = None  # Position data will be set after packing
 
 def pack_squares(squares, container_size):
-    squares.sort(key=lambda square_data: square_data[1] * square_data[2], reverse=True)  # Sort by area
+    # sort by min side length
+    squares.sort(key=lambda square_data: min(square_data[1] , square_data[2]), reverse=True)  
     containers = []  # Initialize containers list
     square_positions = []
 
@@ -109,8 +110,8 @@ def main():
     parser = argparse.ArgumentParser(description="Pack textures into a larger image and generate JSON metadata.")
     parser.add_argument("textures_directory", help="Path to the directory containing textures")
     parser.add_argument("--output_json", "-o", type=str, default="packed_texture.json", help="Output JSON file path")
-    parser.add_argument("--output_dir", "-d", type=str, default="output", help="Directory to save packed textures and images")
-    parser.add_argument("--container_size", type=int, default=1024, help="Size of the container to pack textures into (default: 1024)")
+    parser.add_argument("--output_dir", "-d", type=str, default="packed_textures", help="Directory to save packed textures and images (default: packed textures)")
+    parser.add_argument("--packed_texture_size","-s", type=int, default=1024, help="Size of the image to pack textures into, it packs into a square of a power of two, this argument is the size of the square along with and height (default: 1024)")
     args = parser.parse_args()
 
     # Ensure output directory exists
@@ -119,7 +120,7 @@ def main():
     print("Scanning for textures...")
     textures_data = collect_textures_data(args.textures_directory)
     print("Packing textures...")
-    containers, packed_positions = pack_squares(textures_data, args.container_size)
+    containers, packed_positions = pack_squares(textures_data, args.packed_texture_size)
 
     # Prepare JSON data
     sub_textures = {}
@@ -142,7 +143,7 @@ def main():
     print(f"Metadata saved to {json_output_path}")
 
     for index, (_, container_image) in enumerate(containers):
-        output_path = os.path.join(args.output_dir, f"container_{index}.png")
+        output_path = os.path.join(args.output_dir, f"packed_texture_{index}.png")
         container_image.save(output_path)
         print(f"Saved container image to {output_path}")
 
