@@ -48,6 +48,8 @@ def pack_squares(squares, container_size):
 
     for square_data in tqdm(squares, desc="Packing textures"):
         filename, width, height, texture_image, subtextures = square_data
+        if width > container_size or height > container_size:
+            print(f"error the image {filename} has dimensions {width}x{height}, but the container is {container_size}x{container_size}, make the container size bigger")
         block = Block(width, height, filename, texture_image, subtextures)
         placed = False
 
@@ -89,6 +91,7 @@ def collect_textures_data(directory):
             if file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 file_path = os.path.join(root, file)
                 with Image.open(file_path) as img:
+
                     width, height = img.size
                     if is_power_of_two(width) and is_power_of_two(height):
                         subtextures = {}
@@ -100,7 +103,10 @@ def collect_textures_data(directory):
                                 subtextures = json.load(json_file).get("sub_textures", {})
 
                         # Append data including the full file path
+                        print(f"found texture {file_path} with dimensions {width}x{height}")
                         textures_data.append((file_path, width, height, img.copy(), subtextures))
+                    else:
+                        print(f"the texture {file_path} did not have a power of two dimensions")
     return textures_data
 
 def is_power_of_two(n):
