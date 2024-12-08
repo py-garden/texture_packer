@@ -115,7 +115,6 @@ def is_power_of_two(n):
 def main():
     parser = argparse.ArgumentParser(description="Pack textures into a larger image and generate JSON metadata.")
     parser.add_argument("textures_directory", help="Path to the directory containing textures")
-    parser.add_argument("--output_json", "-o", type=str, default="packed_texture.json", help="Output JSON file path")
     parser.add_argument("--output_dir", "-d", type=str, default="packed_textures", help="Directory to save packed textures and images (default: packed textures)")
     parser.add_argument("--packed_texture_size","-s", type=int, default=1024, help="Size of the image to pack textures into, it packs into a square of a power of two, this argument is the size of the square along with and height (default: 1024)")
     args = parser.parse_args()
@@ -143,7 +142,7 @@ def main():
     result = {"sub_textures": sub_textures}
 
     # Write JSON metadata to the specified output directory
-    json_output_path = os.path.join(args.output_dir, args.output_json)
+    json_output_path = os.path.join(args.output_dir, "packed_texture.json")
     with open(json_output_path, 'w') as json_file:
         json.dump(result, json_file, indent=4)
     print(f"Metadata saved to {json_output_path}")
