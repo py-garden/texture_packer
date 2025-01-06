@@ -1,70 +1,124 @@
+from __future__ import annotations
 import os
 import json
 import argparse
 from PIL import Image
 from tqdm import tqdm
 import math
+from typing import List, Tuple, Optional, Set
+from dataclasses import dataclass
+import pickle
+import re
+
+def save_packed_state(packed_textures: List[PackedTexture], packed_texture_indices: List[PackedTextureIndex], output_dir: str):
+    packed_state = {
+        "packed_textures": [(pt.packer.root, pt.image) for pt in packed_textures],
+        "packed_texture_indices": packed_texture_indices,
+    }
+    with open(os.path.join(output_dir, "packed_state.pkl"), "wb") as file:
+        pickle.dump(packed_state, file)
+    print(f"Packed state saved to {os.path.join(output_dir, 'packed_state.pkl')}")
+
+def load_packed_state(file_path: str) -> Tuple[List[PackedTexture], List[PackedTextureIndex]]:
+    with open(file_path, "rb") as file:
+        packed_state = pickle.load(file)
+    packed_textures = [
+        PackedTexture(Packer(pt[0].w, pt[0].h), pt[1]) for pt in packed_state["packed_textures"]
+    ]
+    packed_texture_indices = packed_state["packed_texture_indices"]
+    return packed_textures, packed_texture_indices
+
+@dataclass
+class PackedNode:
+    x: int
+    y: int
+    w: int
+    h: int
+    used: bool = False
+    left: Optional[PackedNode] = None
+    right: Optional[PackedNode] = None
 
 class Packer:
-    def __init__(self, width, height):
-        self.root = {"x": 0, "y": 0, "w": width, "h": height}
+    def __init__(self, width: int, height: int):
+        self.root = PackedNode(0, 0, width, height)
 
-    def fit(self, blocks):
+    def fit(self, blocks: List[Block]):
         for block in blocks:
             node = self.find_node(self.root, block.w, block.h)
             if node:
-                block.fit = self.split_node(node, block.w, block.h)
+                block.packed_placement = self.split_node(node, block.w, block.h)
             else:
-                block.fit = None
+                block.packed_placement = None
 
-    def find_node(self, root, width, height):
-        if root.get("used"):
-            return self.find_node(root.get("right"), width, height) or self.find_node(root.get("down"), width, height)
-        elif width <= root["w"] and height <= root["h"]:
+    def find_node(self, root: Optional[PackedNode], width: int, height: int) -> Optional[PackedNode]:
+        if root is None:
+            return None
+        if root.used:
+            return (
+                self.find_node(root.right, width, height)
+                or self.find_node(root.left, width, height)
+            )
+        elif width <= root.w and height <= root.h:
             return root
         else:
             return None
 
-    def split_node(self, node, width, height):
-        node["used"] = True
-        node["down"] = {"x": node["x"], "y": node["y"] + height, "w": node["w"], "h": node["h"] - height}
-        node["right"] = {"x": node["x"] + width, "y": node["y"], "w": node["w"] - width, "h": height}
+    def split_node(self, node: PackedNode, width: int, height: int) -> PackedNode:
+        node.used = True
+        node.right = PackedNode(node.x + width, node.y, node.w - width, height)
+        node.left = PackedNode(node.x, node.y + height, node.w, node.h - height)
         return node
 
+@dataclass
+class PackedTexture:
+    packer: Packer
+    image: Image.Image
+
+@dataclass
+class PackedTextureIndex:
+    packed_index: int
+    top_left_corner_x: int
+    top_left_corner_y: int
+    packed_subtextures: dict[str, dict[str, float]]
+
+
+@dataclass
 class Block:
-    def __init__(self, width, height, filename, texture_image, subtextures):
-        self.w = width
-        self.h = height
-        self.filename = filename
-        self.texture_image = texture_image
-        self.subtextures = subtextures  # Added for storing subtexture data
-        self.fit = None  # Position data will be set after packing
+    w: int
+    h : int
+    filename : str
+    texture_image : Image.Image
+    subtextures: dict[str, dict[str, float]] 
+    packed_placement = Optional[PackedNode]
 
-def pack_squares(squares, container_size):
+def pack_texture_blocks(texture_blocks: List[Block], container_size: int) -> Tuple[List[PackedTexture], List[PackedTextureIndex]]:
     # sort by min side length
-    squares.sort(key=lambda square_data: min(square_data[1] , square_data[2]), reverse=True)  
-    containers = []  # Initialize containers list
-    square_positions = []
+    texture_blocks.sort(key=lambda block: min(block.w , block.h), reverse=True)  
 
-    for square_data in tqdm(squares, desc="Packing textures"):
-        filename, width, height, texture_image, subtextures = square_data
-        if width > container_size or height > container_size:
-            print(f"error the image {filename} has dimensions {width}x{height}, but the container is {container_size}x{container_size}, make the container size bigger")
-        block = Block(width, height, filename, texture_image, subtextures)
+    currently_created_packed_textures : List[PackedTexture] = []  
+    packed_texture_indices : List[PackedTextureIndex] = []
+
+    for block in tqdm(texture_blocks, desc="Packing textures"):
+        if block.w > container_size or block.h > container_size:
+            print(f"error the image {block.filename} has dimensions {block.w}x{block.h}, but the container is {container_size}x{container_size}, make the container size bigger")
+
         placed = False
 
-        for packer, container_image in containers:
-            packer.fit([block])
-            if block.fit:
-                x, y = block.fit["x"], block.fit["y"]
-                container_image.paste(texture_image, (x, y))
+        # on the first iteration there are no containers
+        for pt in currently_created_packed_textures:
+            pt.packer.fit([block])
+            if block.packed_placement:
+                x, y = block.packed_placement.x, block.packed_placement.y
+                pt.image.paste(block.texture_image, (x, y))
 
                 # Adjust subtexture positions
                 if block.subtextures:
                     for subtexture_name, subtexture_data in block.subtextures.items():
                         subtexture_data["x"] += x
                         subtexture_data["y"] += y
-                square_positions.append((len(containers) - 1, x, y, width, block.subtextures))
+
+                packed_texture_index = PackedTextureIndex(len(currently_created_packed_textures) - 1, x, y, block.subtextures)
+                packed_texture_indices.append(packed_texture_index)
                 placed = True
                 break
 
@@ -74,39 +128,82 @@ def pack_squares(squares, container_size):
             new_container_image = Image.new('RGBA', (container_size, container_size), (0, 0, 0, 0))
             new_packer.fit([block])
 
-            if block.fit:
-                x, y = block.fit["x"], block.fit["y"]
-                new_container_image.paste(texture_image, (x, y))
-                square_positions.append((len(containers), x, y, width, block.subtextures))
+            if block.packed_placement:
+                x, y = block.packed_placement.x, block.packed_placement.y
+                new_container_image.paste(block.texture_image, (x, y))
 
-            containers.append((new_packer, new_container_image))
+                packed_texture_index = PackedTextureIndex(len(currently_created_packed_textures) , x, y, block.subtextures)
+                packed_texture_indices.append(packed_texture_index)
 
-    return containers, square_positions
+            pt = PackedTexture(new_packer, new_container_image)
+            currently_created_packed_textures.append(pt)
 
-def collect_textures_data(directory):
-    """Collect valid square texture data from a directory, along with any subtexture metadata."""
-    textures_data = []
+    return currently_created_packed_textures, packed_texture_indices
+
+def collect_textures_data_from_dir(directory, output_dir, currently_packed_texture_paths) -> List[Block]:
+    """
+    Collect valid square texture data from a directory, along with any subtexture metadata.
+    Avoids textures generated by the script (e.g., packed_texture_*.png) and already processed textures.
+    
+    Args:
+        directory (str): The directory to scan for textures.
+        output_dir (str): The directory where generated textures are stored.
+        processed_files (set): A set of file paths that have already been processed.
+    
+    Returns:
+        List[Block]: A list of valid textures as Block objects.
+    """
+    
+    # Regular expression to match generated texture names
+    generated_pattern = re.compile(r"^packed_texture_\d+\.png$")
+
+    image_file_paths = []
+    
     for root, _, files in os.walk(directory):
         for file in files:
             if file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 file_path = os.path.join(root, file)
-                with Image.open(file_path) as img:
+                
+                # Skip files generated by the script
+                if generated_pattern.match(file) and os.path.samefile(root, output_dir):
+                    print(f"Skipping generated texture file: {file}")
+                    continue
+                
+                # Skip already processed files
+                if file_path in currently_packed_texture_paths:
+                    print(f"Skipping already processed texture file: {file_path}")
+                    continue
 
-                    width, height = img.size
-                    if is_power_of_two(width) and is_power_of_two(height):
-                        subtextures = {}
+                image_file_paths.append(file_path)
 
-                        # Check for associated JSON file
-                        json_path = os.path.splitext(file_path)[0] + ".json"
-                        if os.path.exists(json_path):
-                            with open(json_path, 'r') as json_file:
-                                subtextures = json.load(json_file).get("sub_textures", {})
+    return collect_textures_data(image_file_paths, currently_packed_texture_paths)
 
-                        # Append data including the full file path
-                        print(f"found texture {file_path} with dimensions {width}x{height}")
-                        textures_data.append((file_path, width, height, img.copy(), subtextures))
-                    else:
-                        print(f"the texture {file_path} did not have a power of two dimensions")
+def collect_textures_data(image_file_paths: List[str], currently_packed_texture_paths: Set[str]) -> List[Block]:
+
+    textures_data: List[Block] = []
+                
+    for file_path in image_file_paths:
+        with Image.open(file_path) as img:
+            width, height = img.size
+            if is_power_of_two(width) and is_power_of_two(height):
+                subtextures = {}
+
+                # Check for associated JSON file
+                json_path = os.path.splitext(file_path)[0] + ".json"
+                if os.path.exists(json_path):
+                    with open(json_path, 'r') as json_file:
+                        subtextures = json.load(json_file).get("sub_textures", {})
+
+                # Append data including the full file path
+                print(f"Found texture {file_path} with dimensions {width}x{height}")
+                block = Block(width, height, file_path, img.copy(), subtextures)
+                textures_data.append(block)
+                
+                # Add the file to the processed set
+                currently_packed_texture_paths.add(file_path)
+            else:
+                print(f"The texture {file_path} did not have power-of-two dimensions")
+    
     return textures_data
 
 def is_power_of_two(n):
@@ -114,42 +211,92 @@ def is_power_of_two(n):
 
 def main():
     parser = argparse.ArgumentParser(description="Pack textures into a larger image and generate JSON metadata.")
-    parser.add_argument("textures_directory", help="Path to the directory containing textures")
-    parser.add_argument("--output_dir", "-d", type=str, default="packed_textures", help="Directory to save packed textures and images (default: packed textures)")
-    parser.add_argument("--packed_texture_size","-s", type=int, default=1024, help="Size of the image to pack textures into, it packs into a square of a power of two, this argument is the size of the square along with and height (default: 1024)")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--textures_directory", "-t", help="Path to the directory containing textures")
+    group.add_argument("--texture_paths_file", "-f", help="Path to a file containing the list of texture paths")
+    parser.add_argument("--output_dir", "-d", type=str, default="packed_textures",
+                        help="Directory to save packed textures and images (default: packed_textures)")
+    parser.add_argument("--packed_texture_size", "-s", type=int, default=1024,
+                        help="Size of the image to pack textures into, in pixels (default: 1024)")
+    parser.add_argument("--append", "-a", action="store_true",
+                        help="Continue packing using an existing packed state if available")
     args = parser.parse_args()
 
-    # Ensure output directory exists
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print("Scanning for textures...")
-    textures_data = collect_textures_data(args.textures_directory)
-    print("Packing textures...")
-    containers, packed_positions = pack_squares(textures_data, args.packed_texture_size)
+    if args.append and os.path.exists(os.path.join(args.output_dir, "packed_state.pkl")):
+        print("Loading existing packed state...")
+        currently_created_packed_textures, packed_texture_indices = load_packed_state(
+            os.path.join(args.output_dir, "packed_state.pkl")
+        )
+    else:
+        currently_created_packed_textures = []
+        packed_texture_indices = []
 
-    # Prepare JSON data
+    def load_processed_files(file_path):
+        """Load processed file paths from a file."""
+        try:
+            with open(file_path, "r") as f:
+                return set(line.strip() for line in f if line.strip())
+        except FileNotFoundError:
+            return set()
+
+    currently_packed_texture_paths_file = os.path.join(args.output_dir, "currently_packed_texture_paths.txt")
+
+    if args.append:
+        print("Loading previously processed textures...")
+        currently_packed_texture_paths = load_processed_files(currently_packed_texture_paths_file)
+    else:
+        currently_packed_texture_paths = set()
+
+    print("Collecting texture paths...")
+    if args.textures_directory:
+        texture_blocks = collect_textures_data_from_dir(args.textures_directory, args.output_dir, currently_packed_texture_paths)
+    elif args.texture_paths_file:
+        try:
+            with open(args.texture_paths_file, "r") as file:
+                texture_paths = [line.strip() for line in file if line.strip()]
+            # texture_blocks = collect_textures_data(texture_paths, args.output_dir, currently_packed_texture_paths, from_file=True)
+            texture_blocks = collect_textures_data(texture_paths, currently_packed_texture_paths)
+        except FileNotFoundError:
+            print(f"Error: The file {args.texture_paths_file} does not exist.")
+            return
+
+    print("Packing textures...")
+
+    with open(currently_packed_texture_paths_file, "w") as f:
+        for file_path in currently_packed_texture_paths:
+            f.write(file_path + "\n")
+
+    packed_textures, new_packed_texture_indices = pack_texture_blocks(
+        texture_blocks, args.packed_texture_size
+    )
+    currently_created_packed_textures.extend(packed_textures)
+    packed_texture_indices.extend(new_packed_texture_indices)
+
+    save_packed_state(currently_created_packed_textures, packed_texture_indices, args.output_dir)
+
     sub_textures = {}
-    for (filename, width, height, _, original_subtextures), (container_idx, x, y, _, updated_subtextures) in zip(textures_data, packed_positions):
-        sub_textures[filename] = {
-            "container_index": container_idx,
-            "x": x,
-            "y": y,
-            "width": width,
-            "height": height,
-            "sub_textures": updated_subtextures  # Include updated subtexture positions
+    for block, packed_texture_index in zip(texture_blocks, new_packed_texture_indices):
+        sub_textures[block.filename] = {
+            "container_index": packed_texture_index.packed_index,
+            "x": packed_texture_index.top_left_corner_x,
+            "y": packed_texture_index.top_left_corner_y,
+            "width": block.w,
+            "height": block.h,
+            "sub_textures": packed_texture_index.packed_subtextures,
         }
 
     result = {"sub_textures": sub_textures}
 
-    # Write JSON metadata to the specified output directory
     json_output_path = os.path.join(args.output_dir, "packed_texture.json")
     with open(json_output_path, 'w') as json_file:
         json.dump(result, json_file, indent=4)
     print(f"Metadata saved to {json_output_path}")
 
-    for index, (_, container_image) in enumerate(containers):
+    for index, packed_texture in enumerate(currently_created_packed_textures):
         output_path = os.path.join(args.output_dir, f"packed_texture_{index}.png")
-        container_image.save(output_path)
+        packed_texture.image.save(output_path)
         print(f"Saved container image to {output_path}")
 
 if __name__ == "__main__":
